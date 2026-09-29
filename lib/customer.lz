@@ -1,0 +1,63 @@
+# customer - identifies a caller across requests with a signed session
+# cookie (built on the `session`/`uuid` packages). There is no login
+# system here - a request either carries a valid `larzpay_session`
+# cookie for an id we minted, or it gets a fresh id and a Set-Cookie for
+# next time. Good enough to keep a per-customer wallet stable across a
+# curl -b/-c cookie jar or a browser tab; not authentication.
+#
+#   import "customer" as customer
+#   let id = customer.identify(req, "app-secret")   # from a valid cookie, or a fresh uuid
+#   # ... after building the response dict:
+#   response = customer.attach(response, id, "app-secret")
+
+import "session" as session
+import "uuid" as uuid
+
+let COOKIE_NAME = "larzpay_session"
+
+fn _parse_cookie_header(value) {
+  let out = {}
+  if value == nil { return out }
+  for part in value.split(";") {
+    let p = part.strip()
+    if len(p) == 0 { continue }
+    let eq = p.find("=")
+    if eq < 0 { continue }
+    out[p[0:eq].strip()] = p[eq+1:].strip()
+  }
+  return out
+}
+
+# Returns the customer id carried by `req`'s Cookie header, or a fresh
+# uuid if there isn't one / it doesn't verify. Does NOT set a cookie on
+# its own - call attach() when building the response so the id is only
+# ever "confirmed" once the client actually stores it.
+fn identify(req, secret) {
+  let headers = req["headers"]
+  if not headers.has("cookie") { return uuid.v4() }
+  let cookies = _parse_cookie_header(headers["cookie"])
+  if not cookies.has(COOKIE_NAME) { return uuid.v4() }
+  let data = session.verify(cookies[COOKIE_NAME], secret)
+  if data == nil or not data.has("customer_id") { return uuid.v4() }
+  return data["customer_id"]
+}
+
+# Adds a Set-Cookie header for `customer_id` to a {status, headers, body}
+# response dict and returns it (mutates and returns the same dict).
+fn attach(response, customer_id, secret) {
+  if not response.has("headers") { response["headers"] = {} }
+  let cookie = session.create({"customer_id": customer_id}, secret)
+  response["headers"]["Set-Cookie"] = COOKIE_NAME + "=" + cookie + "; Path=/; HttpOnly"
+  return response
+}
+
+# A ready-to-use app.use() middleware: sets req["customer_id"] before
+# the route runs, and Set-Cookie's it on the way back out so the same
+# id comes back next time (e.g. via curl -b/-c or a real cookie jar).
+fn middleware(secret) {
+  return fn(req, next) {
+    req["customer_id"] = identify(req, secret)
+    let response = next(req)
+    return attach(response, req["customer_id"], secret)
+  }
+}

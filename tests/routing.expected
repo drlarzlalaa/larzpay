@@ -1,0 +1,20 @@
+--- GET / ---
+HTTP/1.1 200 OK
+Set-Cookie: <redacted>
+Content-Type: text/plain; charset=utf-8
+Content-Length: 50
+
+LarzPay demo - see README for the curl walkthrough--- GET /static/hello.txt ---
+HTTP/1.1 200 OK
+Content-Type: text/plain
+Set-Cookie: <redacted>
+Content-Length: 25
+
+hello from a static file
+--- GET /nope (404) ---
+HTTP/1.1 404 Not Found
+Set-Cookie: <redacted>
+Content-Type: text/plain; charset=utf-8
+Content-Length: 20
+
+not found: GET /nope

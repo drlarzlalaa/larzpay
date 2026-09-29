@@ -1,0 +1,26 @@
+--- pro before funding (expect 402) ---
+HTTP/1.1 402 Payment Required
+X-LarzPay-Price: $5.00
+Set-Cookie: <redacted>
+Content-Type: text/plain; charset=utf-8
+Content-Length: 72
+
+Payment Required: $5.00 needed. Fund your wallet (see README) and retry.--- fund ---
+HTTP/1.1 200 OK
+Set-Cookie: <redacted>
+Content-Type: text/plain; charset=utf-8
+Content-Length: 23
+
+funded. balance: $10.00--- pro first request, funded (expect 200, charged once) ---
+HTTP/1.1 200 OK
+Set-Cookie: <redacted>
+Content-Type: text/plain; charset=utf-8
+Content-Length: 70
+
+welcome to the pro section - this access lasts 3600s from first charge--- pro second request, same cookie jar within ttl (expect 200, NOT re-charged) ---
+HTTP/1.1 200 OK
+Set-Cookie: <redacted>
+Content-Type: text/plain; charset=utf-8
+Content-Length: 70
+
+welcome to the pro section - this access lasts 3600s from first charge

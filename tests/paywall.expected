@@ -1,0 +1,26 @@
+--- unfunded article (expect 402) ---
+HTTP/1.1 402 Payment Required
+X-LarzPay-Price: $0.10
+Set-Cookie: <redacted>
+Content-Type: text/plain; charset=utf-8
+Content-Length: 72
+
+Payment Required: $0.10 needed. Fund your wallet (see README) and retry.--- fund ---
+HTTP/1.1 200 OK
+Set-Cookie: <redacted>
+Content-Type: text/plain; charset=utf-8
+Content-Length: 23
+
+funded. balance: $10.00--- funded article (expect 200) ---
+HTTP/1.1 200 OK
+Set-Cookie: <redacted>
+Content-Type: text/plain; charset=utf-8
+Content-Length: 63
+
+article #1: the price of a cup of coffee, priced in Larzscript.--- a second article view charges again (pay-per-view, expect balance to drop) ---
+HTTP/1.1 200 OK
+Set-Cookie: <redacted>
+Content-Type: text/plain; charset=utf-8
+Content-Length: 63
+
+article #2: the price of a cup of coffee, priced in Larzscript.

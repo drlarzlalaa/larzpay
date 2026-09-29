@@ -1,0 +1,129 @@
+# app - the LarzPay framework core: routing (built on the `router`
+# package, not reimplemented), an ordered middleware chain, static file
+# serving with a real path-traversal boundary, and the glue to
+# `tcp.serve()`. Money-aware routing (`pay_route`/`access_route`) lives
+# in pay.lz, on top of this.
+#
+#   import "app" as app
+#   let a = app.new()
+#   app.get(a, "/hello/<name>", fn(req) { return "hi " + req["params"]["name"] })
+#   app.static(a, "/static", "./public")
+#   app.run(a, 8080)
+
+import "router" as router
+import "mime" as mime
+import "url" as url
+import "httpmsg" as httpmsg
+import "tcp" as tcp
+
+fn new() {
+  return {"router": router.new(), "middlewares": [], "statics": []}
+}
+
+# Method is folded into the router pattern as its own leading path
+# segment ("/GET/users/<int:id>") since the `router` package matches on
+# path segments only, with no concept of an HTTP method - this reuses
+# it as-is instead of forking it. One consequence, and a deliberate
+# simplification: a path registered under one method but requested with
+# another comes back 404, not 405 (the router has no way to tell "no
+# path matched" apart from "path matched, wrong method").
+fn _route_key(method, path) { return "/" + method.upper() + path }
+
+fn route(app, method, pattern, handler) {
+  router.add(app["router"], _route_key(method, pattern), handler)
+}
+
+fn get(app, pattern, handler) { route(app, "GET", pattern, handler) }
+fn post(app, pattern, handler) { route(app, "POST", pattern, handler) }
+fn put(app, pattern, handler) { route(app, "PUT", pattern, handler) }
+fn delete_(app, pattern, handler) { route(app, "DELETE", pattern, handler) }
+
+# Registers a middleware `fn(req, next)`. Runs in registration order -
+# the first middleware registered is the outermost, sees the request
+# first, and decides whether/when to call `next(req)`.
+fn use(app, middleware) { app["middlewares"].push(middleware) }
+
+# Serves files under `dir_path` at URLs starting with `url_prefix`.
+fn static(app, url_prefix, dir_path) {
+  app["statics"].push({"prefix": url_prefix, "dir": dir_path})
+}
+
+fn _starts_with(s, prefix) { return len(s) >= len(prefix) and s[0:len(prefix)] == prefix }
+
+# Resolves a static request; returns nil (not this mount / not found) so
+# the caller can try the next mount or fall through to routing, or a
+# response dict. `..` anywhere in the decoded remainder is rejected
+# outright (403) rather than "normalized" - simpler and safe by
+# construction, at the cost of also rejecting a few odd-but-legitimate
+# encoded filenames, which is the trade this project makes on purpose.
+fn _serve_static(entry, path) {
+  if not _starts_with(path, entry["prefix"]) { return nil }
+  let rel = url.decode(path[len(entry["prefix"]):])
+  for seg in rel.split("/") {
+    if seg == ".." { return {"status": 403, "body": "forbidden"} }
+  }
+  let dir = entry["dir"]
+  let sep = (len(dir) > 0 and dir[len(dir)-1:] == "/") ? "" : "/"
+  let file_path = dir + sep + rel
+  if not file_exists(file_path) { return nil }
+  return {"status": 200, "headers": {"Content-Type": mime.type_of(file_path)}, "body": read_file(file_path)}
+}
+
+fn _dispatch(app, req) {
+  for entry in app["statics"] {
+    let result = _serve_static(entry, req["path"])
+    if result != nil { return result }
+  }
+  let m = router.match(app["router"], _route_key(req["method"], req["path"]))
+  if m == nil { return {"status": 404, "body": "not found: " + req["method"] + " " + req["path"]} }
+  req["params"] = m["params"]
+  return m["handler"](req)
+}
+
+fn _normalize(result) {
+  if type(result) == "string" { return {"status": 200, "headers": {}, "body": result} }
+  return result
+}
+
+# Wraps `fn(req) -> result` with the registered middlewares, first
+# registered outermost, and dispatch as the innermost step.
+fn _build_chain(app) {
+  let chain = fn(req) { return _normalize(_dispatch(app, req)) }
+  let mws = app["middlewares"]
+  let i = len(mws) - 1
+  while i >= 0 {
+    let mw = mws[i]
+    let next = chain
+    chain = fn(req) { return _normalize(mw(req, next)) }
+    i = i - 1
+  }
+  return chain
+}
+
+# Builds the single request handler `tcp.serve()` needs: parse -> chain
+# -> build response. Never lets an exception escape - tcp.serve()'s loop
+# has no try/catch of its own, so one bad request or one handler bug
+# would otherwise take the whole server down for every future request.
+# A parse failure is a 400; anything a handler throws is a 500 whose
+# body includes the error type/message (fine for a dev framework; a
+# production fork would want to hide that behind a flag).
+fn handler_for(app) {
+  let chain = _build_chain(app)
+  return fn(raw_request) {
+    try {
+      let req = httpmsg.parse_request(raw_request)
+      return httpmsg.build_response(chain(req))
+    } catch e {
+      let status = e.has("type") and e["type"] == "HttpParseError" ? 400 : 500
+      let msg = e.has("type") ? e["type"] + ": " + e["message"] : str(e)
+      return httpmsg.build_response({"status": status, "body": msg})
+    }
+  }
+}
+
+# Blocks forever, answering one request at a time (tcp.serve()'s own
+# limitation - a single-threaded interpreter, no concurrency primitive).
+fn run(app, port) {
+  print("LarzPay listening on http://127.0.0.1:" + str(port))
+  tcp.serve(port, handler_for(app))
+}

@@ -1,0 +1,113 @@
+# httpmsg - HTTP/1.1 request parsing and response building on top of raw
+# socket text. Larzscript has `tcp.serve()` (a real TCP server) but
+# nothing that turns the raw bytes it hands a handler into a structured
+# request, or a {status, headers, body} dict back into wire bytes - that
+# parsing/building layer is what this module adds.
+#
+# Deliberately not spec-complete: one `tcp.read()` call per connection
+# (fine for a curl-sized request/response over localhost, not a
+# streaming parser for a slow client or a huge body), no chunked
+# transfer-encoding, no HTTP/2, no multipart parsing. Honest limitations,
+# not silent gaps - see the project README.
+#
+#   import "httpmsg" as httpmsg
+#   let req = httpmsg.parse_request(raw_text)
+#   print(req["method"], req["path"], req["query"], req["headers"], req["body"])
+#   let wire = httpmsg.build_response({"status": 200, "body": "hi"})
+
+import "url" as url
+
+let REASONS = {
+  "200": "OK", "201": "Created", "204": "No Content",
+  "301": "Moved Permanently", "302": "Found", "304": "Not Modified",
+  "400": "Bad Request", "401": "Unauthorized", "402": "Payment Required",
+  "403": "Forbidden", "404": "Not Found", "405": "Method Not Allowed",
+  "500": "Internal Server Error"
+}
+
+fn _reason(status) {
+  let key = str(status)
+  return REASONS.has(key) ? REASONS[key] : "OK"
+}
+
+# Parses raw HTTP/1.1 request text into
+# {method, path, query (dict), headers (dict, lower-cased names), body, version}.
+# Throws {"type": "HttpParseError", ...} on a malformed request/status line.
+fn parse_request(raw) {
+  let sep = raw.find("\r\n\r\n")
+  let head = sep >= 0 ? raw[0:sep] : raw
+  let body = sep >= 0 ? raw[sep+4:] : ""
+
+  let lines = head.split("\r\n")
+  if len(lines) == 0 or len(lines[0]) == 0 {
+    throw {"type": "HttpParseError", "message": "empty request"}
+  }
+
+  let request_line = lines[0]
+  let parts = []
+  for p in request_line.split(" ") { if len(p) > 0 { parts.push(p) } }
+  if len(parts) < 3 {
+    throw {"type": "HttpParseError", "message": "malformed request line: '" + request_line + "'"}
+  }
+  let method = parts[0].upper()
+  let target = parts[1]
+  let version = parts[2]
+
+  let qmark = target.find("?")
+  let path = qmark >= 0 ? target[0:qmark] : target
+  let query = qmark >= 0 ? url.parse_query(target[qmark+1:]) : {}
+
+  let headers = {}
+  let i = 1
+  while i < len(lines) {
+    let line = lines[i]
+    if len(line) > 0 {
+      let colon = line.find(":")
+      if colon >= 0 {
+        let name = line[0:colon].strip().lower()
+        let value = line[colon+1:].strip()
+        headers[name] = value
+      }
+    }
+    i = i + 1
+  }
+
+  # If a Content-Length arrived and we somehow read more than it (the
+  # single read() can pick up the start of a pipelined next request in
+  # rare cases), trim to the declared length rather than leak it into body.
+  if headers.has("content-length") {
+    let want = int(headers["content-length"])
+    if want >= 0 and len(body) > want { body = body[0:want] }
+  }
+
+  return {"method": method, "path": path, "query": query, "headers": headers, "body": body, "version": version}
+}
+
+fn _header_ci_has(headers, name) {
+  let low = name.lower()
+  for k in keys(headers) { if k.lower() == low { return true } }
+  return false
+}
+
+# Builds raw HTTP/1.1 response text from {status, headers, body}. `status`
+# defaults to 200, `headers` to {}, `body` to "". A missing Content-Type
+# defaults to text/plain; Content-Length is always computed from body,
+# overwriting any caller-supplied value (it must match the real bytes sent).
+fn build_response(res) {
+  let status = res.has("status") ? res["status"] : 200
+  let headers = res.has("headers") ? res["headers"] : {}
+  let body = res.has("body") ? res["body"] : ""
+  if type(body) != "string" { body = str(body) }
+
+  let out_headers = {}
+  for k in keys(headers) { out_headers[k] = headers[k] }
+  if not _header_ci_has(out_headers, "content-type") {
+    out_headers["Content-Type"] = "text/plain; charset=utf-8"
+  }
+  out_headers["Content-Length"] = str(len(body))
+
+  let out = "HTTP/1.1 " + str(status) + " " + _reason(status) + "\r\n"
+  for k in keys(out_headers) { out = out + k + ": " + out_headers[k] + "\r\n" }
+  out = out + "\r\n" + body
+  return out
+}

@@ -1,0 +1,21 @@
+name: test
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install larzscript
+        run: curl -fsSL https://raw.githubusercontent.com/larz-scripter/larzscript/main/install.sh | sh
+      - name: install packages this project uses
+        run: |
+          mkdir -p ~/.larzscript/lib
+          for pkg in router mime url tcp session json base64 crypto uuid random; do
+            curl -fsSL "https://raw.githubusercontent.com/larz-scripter/larzscript-packages/master/packages/$pkg/main.lz" -o ~/.larzscript/lib/"$pkg".lz
+          done
+      - name: syntax check
+        run: |
+          export LARZSCRIPT_PATH="$PWD/lib"
+          for f in lib/*.lz examples/*.lz; do larzscript --check "$f"; done
+      - name: run tests
+        run: sh tests/run_tests.sh

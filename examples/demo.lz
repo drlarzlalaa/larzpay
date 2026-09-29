@@ -1,0 +1,44 @@
+# demo.lz - a tiny LarzPay app: a free route, a static file, a
+# pay-per-view article, and a metered "pro" section. Run it, then in
+# another terminal:
+#
+#   larzscript examples/demo.lz
+#
+#   curl -s -c /tmp/cj -b /tmp/cj http://127.0.0.1:8080/                    # free
+#   curl -s -c /tmp/cj -b /tmp/cj http://127.0.0.1:8080/static/hello.txt    # static file
+#   curl -s -c /tmp/cj -b /tmp/cj http://127.0.0.1:8080/article/1          # 402, no funds yet
+#   curl -s -c /tmp/cj -b /tmp/cj -X POST http://127.0.0.1:8080/fund       # demo faucet
+#   curl -s -c /tmp/cj -b /tmp/cj http://127.0.0.1:8080/article/1          # 200 now
+#   curl -s -c /tmp/cj -b /tmp/cj http://127.0.0.1:8080/pro                # charged once
+#   curl -s -c /tmp/cj -b /tmp/cj http://127.0.0.1:8080/pro                # free again (within ttl)
+
+import "app" as app
+import "pay" as paymod
+import "customer" as customer
+
+let SECRET = env("LARZPAY_SECRET", "dev-secret-not-for-production")
+let a = app.new()
+
+wallet shop
+let ledger = paymod.new(shop)
+
+app.use(a, customer.middleware(SECRET))
+
+app.get(a, "/", fn(req) { return "LarzPay demo - see README for the curl walkthrough" })
+
+app.static(a, "/static", "./examples/public")
+
+app.post(a, "/fund", fn(req) {
+  let bal = paymod.fund(ledger, req["customer_id"], $10.00)
+  return "funded. balance: " + str(bal)
+})
+
+paymod.pay_route(a, "GET", "/article/<int:id>", ledger, $0.10, fn(req) {
+  return "article #" + str(req["params"]["id"]) + ": the price of a cup of coffee, priced in Larzscript."
+})
+
+paymod.access_route(a, "GET", "/pro", ledger, $5.00, 3600, fn(req) {
+  return "welcome to the pro section - this access lasts 3600s from first charge"
+})
+
+app.run(a, int(env("PORT", "8080")))

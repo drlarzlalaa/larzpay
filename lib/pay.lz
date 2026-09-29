@@ -1,0 +1,117 @@
+# pay - money-native paid routes, the reason LarzPay exists: gating an
+# HTTP route behind Larzscript's own `wallet`/`price`/`pay ... from ...
+# to ...`/`require` statements instead of a bolted-on third-party
+# billing API. Amounts here are the language's own native money type
+# ($5.00 literals, or money(9.99) for a computed float) - NOT the
+# `money` package's dict representation (money.of(...) etc.), which is
+# a separate, float-based abstraction the native `wallet`/`pay`
+# statements don't accept (`wallet w = money.of(...)` throws
+# `LarzTypeError: a wallet balance must be money` - verified this
+# session). Pick whichever you need: native money for anything that
+# touches a wallet, the `money` package for multi-currency formatting
+# math on values you're only ever going to print.
+#
+# IMPORTANT - does NOT use the native `paywall`/`subscribe`/`... has
+# ...` statements. Verified (this session, larzscript native 1.42.1):
+# subscription state for those is tracked by the wallet's *declared
+# local variable name*, not the wallet object's identity - two
+# dynamically created wallets returned from the same factory function
+# (exactly the "one wallet per HTTP customer" pattern this framework
+# needs) collide, so subscribing one customer silently grants every
+# other customer access too. Filed as
+# https://github.com/larz-scripter/larzscript/issues/37. This module
+# works around it by using plain `wallet`/`pay ... from ... to ...`
+# (verified safe/independent per object) for the actual money movement,
+# and tracking access grants in an ordinary Larzscript dict keyed by
+# customer id instead of the native paywall.
+#
+#   import "pay" as paymod
+#   wallet shop
+#   let ledger = paymod.new(shop)
+#   paymod.pay_route(app, "GET", "/article/42", ledger, $0.10, fn(req) { return "the article" })
+#   paymod.access_route(app, "GET", "/pro", ledger, $5.00, 3600, fn(req) { return "pro content" })
+
+import "app" as app
+
+fn _make_wallet(start) { wallet w = start; return w }
+
+# `shop_wallet` is a `wallet` the caller declares (bare identifier,
+# money statements only accept those - see README). `mint_amount` seeds
+# an internal faucet wallet used only by fund() below, for demos/tests;
+# a real deployment would fund customer wallets by some other means
+# (an actual payment processor) and never call fund().
+fn new(shop_wallet, mint_amount=money(1000000.00)) {
+  return {"shop": shop_wallet, "mint": _make_wallet(mint_amount), "customers": {}, "access": {}}
+}
+
+fn _get_or_create(ledger, customer_id) {
+  if ledger["customers"].has(customer_id) { return ledger["customers"][customer_id] }
+  let w = _make_wallet(money(0.00))
+  ledger["customers"][customer_id] = w
+  return w
+}
+
+fn balance(ledger, customer_id) { return _get_or_create(ledger, customer_id).balance }
+
+# Demo/test-only faucet: moves `amount` from the ledger's mint wallet
+# into `customer_id`'s wallet, creating it if needed.
+fn fund(ledger, customer_id, amount) {
+  let w = _get_or_create(ledger, customer_id)
+  let mint = ledger["mint"]
+  pay amount from mint to w
+  return w.balance
+}
+
+# Attempts to charge `customer_id` `amount`, moving it into the ledger's
+# shop wallet. Returns {"ok": true, "balance": <money>} or
+# {"ok": false, "type": "MoneyError", "message": "..."} on insufficient
+# funds (the actual error type/message the interpreter throws, verified
+# this session: "MoneyError - wallet 'w' has insufficient funds").
+fn charge(ledger, customer_id, amount) {
+  let w = _get_or_create(ledger, customer_id)
+  let shop = ledger["shop"]
+  try {
+    pay amount from w to shop
+    return {"ok": true, "balance": w.balance}
+  } catch e {
+    return {"ok": false, "type": e["type"], "message": e["message"]}
+  }
+}
+
+fn _payment_required(amount) {
+  return {"status": 402, "headers": {"X-LarzPay-Price": str(amount)}, "body": "Payment Required: " + str(amount) + " needed. Fund your wallet (see README) and retry."}
+}
+
+# Registers a route on `app` that charges `amount` on every single
+# request (pay-per-call) before calling `handler(req)`. `req` must
+# already carry `req["customer_id"]` - see customer.lz, or wire your
+# own identity middleware with app.use() before this route is hit.
+fn pay_route(a, method, pattern, ledger, amount, handler) {
+  app.route(a, method, pattern, fn(req) {
+    if not req.has("customer_id") { return {"status": 500, "body": "pay_route: req[\"customer_id\"] missing - add an identity middleware first"} }
+    let result = charge(ledger, req["customer_id"], amount)
+    if not result["ok"] { return _payment_required(amount) }
+    return handler(req)
+  })
+}
+
+# Registers a route that charges `amount` once, then grants access for
+# `ttl_seconds` (checked with the real clock, `time()`) before charging
+# again - a metered subscription, built honestly on a framework-level
+# dict instead of the buggy native `paywall`.
+fn access_route(a, method, pattern, ledger, amount, ttl_seconds, handler) {
+  app.route(a, method, pattern, fn(req) {
+    if not req.has("customer_id") { return {"status": 500, "body": "access_route: req[\"customer_id\"] missing - add an identity middleware first"} }
+    let cid = req["customer_id"]
+    if not ledger["access"].has(cid) { ledger["access"][cid] = {} }
+    let grants = ledger["access"][cid]
+    let now = time()
+    if grants.has(pattern) and grants[pattern] > now {
+      return handler(req)
+    }
+    let result = charge(ledger, cid, amount)
+    if not result["ok"] { return _payment_required(amount) }
+    grants[pattern] = now + ttl_seconds
+    return handler(req)
+  })
+}
